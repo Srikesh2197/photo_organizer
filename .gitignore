@@ -1,0 +1,9 @@
+.venv/
+models/
+faces.sqlite
+report.csv
+__pycache__/
+.DS_Store
+# your private reference photos stay local
+references/*
+!references/.gitkeep
