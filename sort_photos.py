@@ -209,14 +209,18 @@ def load_image(path: str) -> np.ndarray:
     return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
 
-def list_images(source: Path, exclude: list[Path]) -> list[Path]:
-    """Walk folders in sorted order (kinder to spinning disks), skipping junk and the output folder."""
+def list_images(source: Path, exclude: list[Path], skip_names: tuple[str, ...] = ()) -> list[Path]:
+    """Walk folders in sorted order (kinder to spinning disks), skipping junk and output folders.
+
+    `exclude` are exact folders to skip; `skip_names` are folder names skipped wherever they appear.
+    """
     excl = {os.path.realpath(p) for p in exclude}
+    skip = {n.lower() for n in skip_names}
     found = []
     for root, dirs, files in os.walk(source):
         dirs[:] = sorted(
             d for d in dirs
-            if not d.startswith(".") and d not in SKIP_DIRS
+            if not d.startswith(".") and d not in SKIP_DIRS and d.lower() not in skip
             and os.path.realpath(os.path.join(root, d)) not in excl
         )
         for f in sorted(files):
@@ -401,12 +405,14 @@ def assign(cache: Cache, images: list[Path], names, owners, ref_embs, threshold:
     return rows
 
 
-def write_report(rows, report_path: Path):
-    with open(report_path, "w", newline="", encoding="utf-8") as f:
+def write_report(rows, report_path: Path, dest_folder):
+    # utf-8-sig so Excel on Windows shows non-English names correctly
+    with open(report_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["file", "faces_found", "matched_people", "face_scores", "error"])
+        w.writerow(["file", "faces_found", "matched_people", "copy_to", "face_scores", "error"])
         for r in rows:
-            w.writerow([r["file"], r["faces"], "; ".join(r["people"]), " | ".join(r["details"]), r["error"]])
+            dests = " ; ".join(str(dest_folder(Path(r["file"]), p)) for p in r["people"])
+            w.writerow([r["file"], r["faces"], "; ".join(r["people"]), dests, " | ".join(r["details"]), r["error"]])
 
 
 def unique_dest(folder: Path, src: Path) -> Path:
@@ -422,7 +428,8 @@ def unique_dest(folder: Path, src: Path) -> Path:
     return dest
 
 
-def copy_files(cache: Cache, rows, out: Path):
+def copy_files(cache: Cache, rows, dest_folder, space_check: Path):
+    """Copy each matched photo into dest_folder(src, person). space_check: a path on the output drive."""
     jobs = []
     for r in rows:
         for person in r["people"]:
@@ -434,12 +441,12 @@ def copy_files(cache: Cache, rows, out: Path):
         print("Copying: nothing new to copy.")
         return
     need = sum(src.stat().st_size for src, _ in jobs)
-    free = shutil.disk_usage(out).free
+    free = shutil.disk_usage(space_check).free
     print(f"Copying {len(jobs)} files ({need / 1e9:.2f} GB); {free / 1e9:.2f} GB free on the output drive")
     if need + 200e6 > free:
         sys.exit("Not enough free space on the output drive. Nothing was copied.")
     for src, person in tqdm(jobs, unit="file"):
-        folder = out / person
+        folder = dest_folder(src, person)
         folder.mkdir(parents=True, exist_ok=True)
         dest = unique_dest(folder, src)
         tmp = dest.with_name(dest.name + ".partial")
@@ -496,7 +503,11 @@ def main():
     ap = argparse.ArgumentParser(description="Copy photos into per-person folders using face recognition.")
     ap.add_argument("--source", required=True, type=Path, help="folder with your photos (scanned recursively)")
     ap.add_argument("--refs", required=True, type=Path, help="folder with one sub-folder of reference photos per person")
-    ap.add_argument("--out", required=True, type=Path, help="where per-person folders are created")
+    where = ap.add_mutually_exclusive_group(required=True)
+    where.add_argument("--out", type=Path, help="one folder where all per-person folders are created")
+    where.add_argument("--per-event", metavar="NAME",
+                       help="instead of --out: create a folder called NAME inside each top-level "
+                            "sub-folder of --source (e.g. Event 1\\NAME\\Person 1)")
     ap.add_argument("--threshold", type=float, default=0.40,
                     help="match strictness 0-1 (default 0.40). Lower = more matches, higher = fewer mistakes")
     ap.add_argument("--dry-run", action="store_true", help="only scan and write report.csv; copy nothing")
@@ -509,20 +520,50 @@ def main():
     ap.add_argument("--no-coreml", action="store_true", help="use CPU only (try this if you see CoreML errors)")
     args = ap.parse_args()
 
-    source, refs, out = args.source.expanduser(), args.refs.expanduser(), args.out.expanduser()
+    def clean(p: Path) -> Path:
+        # On Windows, a quoted path ending in a backslash ("E:\Main Folder\") arrives with a stray quote.
+        return Path(str(p).strip().strip('"')).expanduser().absolute()
+
+    source, refs = clean(args.source), clean(args.refs)
+    if args.out:
+        args.out = clean(args.out)
     for label, p in (("--source", source), ("--refs", refs)):
         if not p.is_dir():
             sys.exit(f"{label} folder not found: {p}  (is the drive plugged in?)")
     if is_inside(refs, source):
         print("Note: the references folder is inside the source; it will be skipped while scanning.")
 
-    writable = check_writable(out)
-    report_path = out / "report.csv"
+    if args.per_event:
+        name = args.per_event.strip().strip("\\/")
+        if not name or any(c in name for c in '\\/:*?"<>|'):
+            sys.exit("--per-event needs a plain folder name, e.g. --per-event Sorted_People")
+
+        def dest_folder(src: Path, person: str) -> Path:
+            rel = src.relative_to(source)
+            base = source / rel.parts[0] if len(rel.parts) > 1 else source  # the event folder
+            return base / name / person
+
+        out = source  # used for the writable and free-space checks
+        skip_names: tuple[str, ...] = (name,)
+        where_text = f"a '{name}' folder inside each event folder of {source}"
+        # The report goes next to this script, so a dry run writes nothing to the photo drive.
+        report_path = HERE / "report.csv"
+        writable = True if args.dry_run else check_writable(source)
+    else:
+        out = args.out.expanduser().absolute()
+
+        def dest_folder(src: Path, person: str) -> Path:
+            return out / person
+
+        skip_names = ()
+        where_text = str(out)
+        writable = check_writable(out)
+        report_path = out / "report.csv"
     if not writable:
         kind = fs_type(out.parent if not out.exists() else out)
         msg = (f"Can't write to {out} (drive format: {kind}).\n"
                + ("This drive is NTFS (Windows format); macOS can only read it.\n" if "ntfs" in kind.lower() else "")
-               + "Choose an --out folder on a writable drive.")
+               + "Check the drive isn't read-only or write-protected, or choose an --out folder on another drive.")
         if not args.dry_run:
             sys.exit(msg)
         report_path = HERE / "report.csv"
@@ -531,14 +572,14 @@ def main():
     engine = FaceEngine(args.models, args.det_size, not args.no_coreml)
     names, owners, ref_embs = enroll(engine, refs, args.min_face)
 
-    images = list_images(source, [out, refs])
+    images = list_images(source, [refs] if args.per_event else [out, refs], skip_names)
     if not images:
         sys.exit(f"No photos found in {source}")
     cache = Cache(args.cache)
     scan(engine, cache, images, args.min_face, args.workers, args.rescan)
 
     rows = assign(cache, images, names, owners, ref_embs, args.threshold)
-    write_report(rows, report_path)
+    write_report(rows, report_path, dest_folder)
 
     counts = Counter(p for r in rows for p in r["people"])
     no_faces = sum(1 for r in rows if r["faces"] == 0 and not r["error"])
@@ -556,8 +597,8 @@ def main():
     if args.dry_run:
         print("Dry run: nothing copied. Check the report, then run again without --dry-run.")
     else:
-        copy_files(cache, rows, out)
-        print(f"Done. Sorted folders are in {out}")
+        copy_files(cache, rows, dest_folder, out)
+        print(f"Done. Sorted folders are in {where_text}")
 
 
 if __name__ == "__main__":

@@ -53,28 +53,46 @@ Tips for good results:
 - **macOS:** run `ls /Volumes`, e.g. `/Volumes/MyHDD/Photos`. If the drive is formatted NTFS (Windows format), a Mac can read it but not write to it; the script detects this and tells you.
 - **Linux:** usually `/media/<you>/<drive>`.
 
-## 4. Dry run first (copies nothing)
+## 4. Choose where the sorted copies go
 
-Windows example:
-```powershell
-.venv\Scripts\python sort_photos.py --source E:\Photos --refs references --out E:\Sorted_People --dry-run
+There are two layouts. Pick one with `--per-event` or `--out`.
+
+**A. Inside each event folder (`--per-event NAME`)**, for a drive organised by event:
 ```
-Mac example:
+Main Folder\
+  Event 1\  [photos]  Sorted_People\Person 1\  Sorted_People\Person 2\
+  Event 2\  [photos]  Sorted_People\Person 1\
+```
+Photos in sub-folders of an event (e.g. `Event 1\Day 2\`) go to that event's folder. Photos sitting directly in `Main Folder` go to `Main Folder\Sorted_People\`. Folders named `Sorted_People` are never scanned, so copies are never sorted again.
+
+**B. One shared folder (`--out FOLDER`)**: all events mixed, e.g. `E:\Sorted_People\Person 1\`.
+
+Only the `--source` folder is read and only the sorted folders are written. Anything outside `--source`, such as a backup copy of your photos next to it, is never opened.
+
+## 5. Dry run first (copies nothing)
+
+Windows (PowerShell, inside the `photo_organizer` folder), per-event layout:
+```powershell
+.venv\Scripts\python sort_photos.py --source "E:\Main Folder" --refs references --per-event Sorted_People --dry-run
+```
+Mac example, one shared folder:
 ```bash
 .venv/bin/python sort_photos.py --source /Volumes/MyHDD/Photos --refs references --out /Volumes/MyHDD/Sorted_People --dry-run
 ```
+Put paths with spaces in quotes, and don't end a quoted Windows path with `\` (`"E:\Main Folder"`, not `"E:\Main Folder\"`).
 
-This scans every photo and writes `report.csv` into the `--out` folder. Open it in Excel or Numbers:
+To try a single event first, point `--source` at that event, e.g. `--source "E:\Main Folder\Event 1"`. In per-event mode the copies then go to `Event 1\Sorted_People\`. Photos scanned during a trial are cached, so they aren't scanned again in the full run.
+
+The dry run scans every photo and writes `report.csv`. With `--per-event`, the report is saved in the `photo_organizer` folder, so a dry run writes nothing to your drive. With `--out`, it goes in the `--out` folder. Open it in Excel or Numbers:
 
 | column | meaning |
 |---|---|
 | `matched_people` | who it would be copied to |
+| `copy_to` | the exact folder(s) it would be copied into |
 | `face_scores` | each face's best score, e.g. `Mom 0.71`, or `(closest Dad 0.31)` when below the threshold |
 | `error` | files that couldn't be opened (corrupt etc.) |
 
-Try one small sub-folder first to check the results.
-
-## 5. Tune the threshold if needed
+## 6. Tune the threshold if needed
 
 The default `--threshold 0.40` is a good start. Scores for the same person are usually 0.5–0.9. Different people are usually below 0.3.
 
@@ -83,7 +101,7 @@ The default `--threshold 0.40` is a good start. Scores for the same person are u
 
 Re-running is fast: face data is cached in `faces.sqlite` next to the script, so photos aren't re-read from the drive. Adding a new person folder later also re-runs quickly.
 
-## 6. Real run
+## 7. Real run
 
 Run the same command (from inside the `photo_organizer` folder) without `--dry-run`. Files are copied with their original dates.
 If two different photos share a name, the second becomes e.g. `IMG_0001__2020.jpg` (the parent folder's name is added).
@@ -94,6 +112,8 @@ It is safe to stop it (Ctrl-C) or unplug the drive. Run the same command again a
 
 | flag | default | what it does |
 |---|---|---|
+| `--per-event NAME` | | put copies in a NAME folder inside each event folder |
+| `--out FOLDER` | | put all copies in one folder (use this or `--per-event`) |
 | `--threshold` | 0.40 | match strictness |
 | `--min-face` | 40 | ignore faces smaller than this many pixels (tiny background faces) |
 | `--det-size` | 640 | detector resolution. 1024 finds smaller faces in big group shots, but is slower |
