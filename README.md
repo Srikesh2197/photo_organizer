@@ -81,7 +81,11 @@ Mac example, one shared folder:
 ```
 Put paths with spaces in quotes, and don't end a quoted Windows path with `\` (`"E:\Main Folder"`, not `"E:\Main Folder\"`).
 
-To try a single event first, point `--source` at that event, e.g. `--source "E:\Main Folder\Event 1"`. In per-event mode the copies then go to `Event 1\Sorted_People\`. Photos scanned during a trial are cached, so they aren't scanned again in the full run.
+To do a single event, point `--source` at that event and use `--out` with a folder inside it (not `--per-event`, which would treat the event's own sub-folders as events):
+```powershell
+.venv\Scripts\python sort_photos.py --source "E:\Main Folder\Event 1" --refs references --out "E:\Main Folder\Event 1\Sorted_People" --dry-run
+```
+Photos scanned and copied this way are remembered, so a later `--per-event Sorted_People` run over all of `Main Folder` won't scan or copy them again.
 
 The dry run scans every photo and writes `report.csv`. With `--per-event`, the report is saved in the `photo_organizer` folder, so a dry run writes nothing to your drive. With `--out`, it goes in the `--out` folder. Open it in Excel or Numbers:
 
